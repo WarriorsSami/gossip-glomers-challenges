@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type BroadcastBody struct {
-	maelstrom.MessageBody
-	Message int `json:"message"`
+	Type    string `json:"type"`
+	Message int    `json:"message"`
 }
 
 type ReadBody struct {
@@ -27,6 +28,7 @@ type ServerNode struct {
 	*maelstrom.Node
 	sync.Mutex
 	Messages  map[int]bool
+	Unacked   map[string]map[int]struct{}
 	Neighbors []string
 }
 
@@ -34,6 +36,7 @@ func NewServerNode() *ServerNode {
 	return &ServerNode{
 		Node:      maelstrom.NewNode(),
 		Messages:  make(map[int]bool),
+		Unacked:   make(map[string]map[int]struct{}),
 		Neighbors: make([]string, 0),
 	}
 }
@@ -50,13 +53,13 @@ func main() {
 		n.Lock()
 		_, seen := n.Messages[body.Message]
 		n.Messages[body.Message] = true
-		n.Unlock()
 
 		if !seen {
 			for _, neighbor := range n.Neighbors {
-				n.Send(neighbor, body)
+				n.Unacked[neighbor][body.Message] = struct{}{}
 			}
 		}
+		n.Unlock()
 
 		return n.Reply(msg, maelstrom.MessageBody{Type: "broadcast_ok"})
 	})
@@ -90,10 +93,44 @@ func main() {
 
 		n.Lock()
 		n.Neighbors = body.Topology[n.ID()]
+		for _, neighbor := range n.Neighbors {
+			n.Unacked[neighbor] = make(map[int]struct{})
+		}
 		n.Unlock()
 
 		return n.Reply(msg, maelstrom.MessageBody{Type: "topology_ok"})
 	})
+
+	go func() {
+		for {
+			time.Sleep(500 * time.Millisecond)
+
+			n.Lock()
+			toSend := make(map[string][]int)
+			for _, neighbor := range n.Neighbors {
+				for msg := range n.Unacked[neighbor] {
+					toSend[neighbor] = append(toSend[neighbor], msg)
+				}
+			}
+			n.Unlock()
+
+			for neighbor, msgs := range toSend {
+				for _, unackedMsg := range msgs {
+					req := BroadcastBody{
+						Type:    "broadcast",
+						Message: unackedMsg,
+					}
+					n.RPC(neighbor, req, func(msg maelstrom.Message) error {
+						n.Lock()
+						defer n.Unlock()
+
+						delete(n.Unacked[neighbor], unackedMsg)
+						return nil
+					})
+				}
+			}
+		}
+	}()
 
 	if err := n.Run(); err != nil {
 		log.Fatal(err)
