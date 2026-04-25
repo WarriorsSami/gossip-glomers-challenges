@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"log"
-	"sort"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
@@ -15,8 +14,8 @@ type BroadcastBody struct {
 }
 
 type ReadBody struct {
-	Type string `json:"type"`
-	Messages []int `json:"messages"`
+	Type     string `json:"type"`
+	Messages []int  `json:"messages"`
 }
 
 type TopologyBody struct {
@@ -27,14 +26,14 @@ type TopologyBody struct {
 type ServerNode struct {
 	*maelstrom.Node
 	sync.Mutex
-	Messages map[int]bool
+	Messages  map[int]bool
 	Neighbors []string
 }
 
 func NewServerNode() *ServerNode {
 	return &ServerNode{
-		Node: maelstrom.NewNode(),
-		Messages: make(map[int]bool),
+		Node:      maelstrom.NewNode(),
+		Messages:  make(map[int]bool),
 		Neighbors: make([]string, 0),
 	}
 }
@@ -49,30 +48,34 @@ func main() {
 		}
 
 		n.Lock()
-		defer n.Unlock()
-
+		_, seen := n.Messages[body.Message]
 		n.Messages[body.Message] = true
+		n.Unlock()
+
+		if !seen {
+			for _, neighbor := range n.Neighbors {
+				n.Send(neighbor, body)
+			}
+		}
 
 		return n.Reply(msg, maelstrom.MessageBody{Type: "broadcast_ok"})
 	})
 
 	n.Handle("read", func(msg maelstrom.Message) error {
-		var body maelstrom.MessageBody 
+		var body maelstrom.MessageBody
 		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return err
 		}
 
 		n.Lock()
-		defer n.Unlock()
-
 		msgs := make([]int, 0, len(n.Messages))
 		for msgVal := range n.Messages {
 			msgs = append(msgs, msgVal)
 		}
-		sort.Ints(msgs)
+		n.Unlock()
 
 		resp := ReadBody{
-			Type: "read_ok",
+			Type:     "read_ok",
 			Messages: msgs,
 		}
 
@@ -86,9 +89,8 @@ func main() {
 		}
 
 		n.Lock()
-		defer n.Unlock()
-
 		n.Neighbors = body.Topology[n.ID()]
+		n.Unlock()
 
 		return n.Reply(msg, maelstrom.MessageBody{Type: "topology_ok"})
 	})
