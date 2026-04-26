@@ -14,6 +14,11 @@ type BroadcastBody struct {
 	Message int    `json:"message"`
 }
 
+type BatchBroadcastBody struct {
+	Type     string `json:"type"`
+	Messages []int  `json:"messages"`
+}
+
 type ReadBody struct {
 	Type     string `json:"type"`
 	Messages []int  `json:"messages"`
@@ -92,7 +97,13 @@ func main() {
 		}
 
 		n.Lock()
-		n.Neighbors = body.Topology[n.ID()]
+		n.Neighbors = make([]string, 0)
+		for neighbor := range body.Topology {
+			if neighbor != n.ID() {
+				n.Neighbors = append(n.Neighbors, neighbor)
+			}
+		}
+
 		for _, neighbor := range n.Neighbors {
 			n.Unacked[neighbor] = make(map[int]struct{})
 		}
@@ -101,9 +112,24 @@ func main() {
 		return n.Reply(msg, maelstrom.MessageBody{Type: "topology_ok"})
 	})
 
+	n.Handle("batch_broadcast", func(msg maelstrom.Message) error {
+		var body BatchBroadcastBody
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
+			return err
+		}
+
+		n.Lock()
+		for _, incomingMsg := range body.Messages {
+			n.Messages[incomingMsg] = true
+		}
+		n.Unlock()
+
+		return n.Reply(msg, maelstrom.MessageBody{Type: "batch_broadcast_ok"})
+	})
+
 	go func() {
 		for {
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 
 			n.Lock()
 			toSend := make(map[string][]int)
@@ -114,20 +140,22 @@ func main() {
 			}
 			n.Unlock()
 
-			for neighbor, msgs := range toSend {
-				for _, unackedMsg := range msgs {
-					req := BroadcastBody{
-						Type:    "broadcast",
-						Message: unackedMsg,
+			for neighbor, unackedMsgs := range toSend {
+				go func (neighbor string, msgs []int) {
+					req := BatchBroadcastBody{
+						Type:     "batch_broadcast",
+						Messages: unackedMsgs,
 					}
 					n.RPC(neighbor, req, func(msg maelstrom.Message) error {
 						n.Lock()
 						defer n.Unlock()
 
-						delete(n.Unacked[neighbor], unackedMsg)
+						for _, unackedMsg := range unackedMsgs {
+							delete(n.Unacked[neighbor], unackedMsg)
+						}
 						return nil
 					})
-				}
+				}(neighbor, unackedMsgs)
 			}
 		}
 	}()
