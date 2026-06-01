@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -61,7 +62,9 @@ func main() {
 
 		if !seen {
 			for _, neighbor := range n.Neighbors {
-				n.Unacked[neighbor][body.Message] = struct{}{}
+				if neighbor != msg.Src {
+					n.Unacked[neighbor][body.Message] = struct{}{}
+				}
 			}
 		}
 		n.Unlock()
@@ -96,9 +99,25 @@ func main() {
 			return err
 		}
 
+		allNodes := make([]string, 0)
+		for neighbor := range body.Topology {
+			allNodes = append(allNodes, neighbor)
+		}
+
+		sort.Strings(allNodes)
+		myIdx := 0
+		for idx, neighbor := range allNodes {
+			if neighbor == n.ID() { 
+				myIdx = idx
+				break
+			}
+		}
+
 		n.Lock()
 		n.Neighbors = make([]string, 0)
-		for neighbor := range body.Topology {
+		total := len(allNodes)
+		for offset := 1; offset < total; offset *= 2 {
+			neighbor := allNodes[(myIdx+offset)%total]
 			if neighbor != n.ID() {
 				n.Neighbors = append(n.Neighbors, neighbor)
 			}
@@ -120,7 +139,14 @@ func main() {
 
 		n.Lock()
 		for _, incomingMsg := range body.Messages {
-			n.Messages[incomingMsg] = true
+			if !n.Messages[incomingMsg] {
+				n.Messages[incomingMsg] = true
+				for _, neighbor := range n.Neighbors {
+					if neighbor != msg.Src {
+						n.Unacked[neighbor][incomingMsg] = struct{}{}
+					} 
+				}
+			}
 		}
 		n.Unlock()
 
@@ -129,7 +155,7 @@ func main() {
 
 	go func() {
 		for {
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(500 * time.Millisecond)
 
 			n.Lock()
 			toSend := make(map[string][]int)
@@ -144,13 +170,13 @@ func main() {
 				go func (neighbor string, msgs []int) {
 					req := BatchBroadcastBody{
 						Type:     "batch_broadcast",
-						Messages: unackedMsgs,
+						Messages: msgs,
 					}
 					n.RPC(neighbor, req, func(msg maelstrom.Message) error {
 						n.Lock()
 						defer n.Unlock()
 
-						for _, unackedMsg := range unackedMsgs {
+						for _, unackedMsg := range msgs {
 							delete(n.Unacked[neighbor], unackedMsg)
 						}
 						return nil
