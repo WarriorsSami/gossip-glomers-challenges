@@ -49,7 +49,8 @@ type ServerNode struct {
 	*maelstrom.Node
 	sync.Mutex
 	CommittedOffsets map[string]int
-	Logs             map[string][]int
+	Logs             map[string]map[int]int
+	NextOffsets      map[string]int
 }
 
 func NewServerNode() *ServerNode {
@@ -58,7 +59,8 @@ func NewServerNode() *ServerNode {
 	return &ServerNode{
 		Node: node,
 		CommittedOffsets: make(map[string]int),
-		Logs: make(map[string][]int),
+		Logs: make(map[string]map[int]int),
+		NextOffsets: make(map[string]int),
 	}
 }
 
@@ -72,8 +74,12 @@ func main() {
 		}
 
 		n.Lock()
-		n.Logs[body.Key] = append(n.Logs[body.Key], body.Msg)
-		offset := len(n.Logs[body.Key]) - 1
+		if n.Logs[body.Key] == nil {
+			n.Logs[body.Key] = make(map[int]int)
+		}
+		offset := n.NextOffsets[body.Key]
+		n.Logs[body.Key][offset] = body.Msg
+		n.NextOffsets[body.Key]++
 		n.Unlock()
 
 		resp := SendResponseBody{
@@ -92,9 +98,12 @@ func main() {
 
 		n.Lock()
 		msgs := make(map[string][][2]int)
-		for key, offset := range body.Offsets {
-			for i := offset; i < len(n.Logs[key]); i++ {
-				msgs[key] = append(msgs[key], [...]int{i, n.Logs[key][i]})
+		for key, startOffset := range body.Offsets {
+			endOffset := n.NextOffsets[key]
+			for offset := startOffset; offset < endOffset; offset++ {
+				if val, ok := n.Logs[key][offset]; ok {
+					msgs[key] = append(msgs[key], [2]int{offset, val})
+				}
 			}
 		}
 		n.Unlock()
